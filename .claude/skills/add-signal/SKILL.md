@@ -1224,6 +1224,7 @@ Create `src/channels/signal.ts` implementing the `Channel` interface. Use `src/c
  * Signal Channel for NanoClaw
  * Uses signal-cli daemon for Signal messaging
  */
+import { ASSISTANT_NAME } from '../config.js';
 import { logger } from '../logger.js';
 import {
   signalCheck,
@@ -1271,6 +1272,13 @@ interface SignalDataMessage {
   quote?: {
     text?: string;
   };
+  mentions?: Array<{
+    start?: number;
+    length?: number;
+    uuid?: string;
+    number?: string;
+    name?: string;
+  }>;
 }
 
 interface SignalReceivePayload {
@@ -1437,7 +1445,30 @@ export class SignalChannel implements Channel {
       return;
     }
 
-    const messageText = dataMessage.message?.trim() || '';
+    let messageText = dataMessage.message || '';
+
+    // Signal mentions replace the mention text with U+FFFC (Object Replacement Character).
+    // Reconstruct the actual text by substituting each mention placeholder with @name.
+    // Process mentions in reverse order so string indices stay valid.
+    if (dataMessage.mentions && dataMessage.mentions.length > 0) {
+      const sorted = [...dataMessage.mentions].sort(
+        (a, b) => (b.start ?? 0) - (a.start ?? 0),
+      );
+      for (const mention of sorted) {
+        const start = mention.start ?? 0;
+        const length = mention.length ?? 1;
+        // If the mention targets the bot's own number, use the assistant name
+        // so the trigger pattern (@McClaw) matches correctly.
+        const isSelf = mention.number && this.normalizePhone(mention.number) === this.normalizePhone(this.opts.account);
+        const name = isSelf ? ASSISTANT_NAME : (mention.name || mention.number || 'unknown');
+        messageText =
+          messageText.slice(0, start) +
+          `@${name}` +
+          messageText.slice(start + length);
+      }
+    }
+
+    messageText = messageText.trim();
     const quoteText = dataMessage.quote?.text?.trim() || '';
     const content = messageText || quoteText;
 
@@ -1581,7 +1612,13 @@ export class SignalChannel implements Channel {
   }
 
   private jidToTarget(jid: string): { type: 'group' | 'dm'; id: string } {
-    if (jid.startsWith('signal:group:')) return { type: 'group', id: jid.replace('signal:group:', '') };
+    if (jid.startsWith('signal:group:')) {
+      // WebSocket events deliver the internal_id (raw base64).
+      // The v2 send API requires "group." + base64(internal_id).
+      const internalId = jid.replace('signal:group:', '');
+      const groupId = `group.${Buffer.from(internalId).toString('base64')}`;
+      return { type: 'group', id: groupId };
+    }
     if (jid.startsWith('signal:')) return { type: 'dm', id: jid.replace('signal:', '') };
     return { type: 'dm', id: jid };
   }
