@@ -2010,6 +2010,8 @@ Replace `YOUR_BOT_NAME` and `YOUR_STATUS_TEXT` with the user's values from Phase
 
 ### Step 2: Add IPC Handlers
 
+> Signal IPC handlers follow a two-tier security model: messaging enhancements (reactions, polls, stickers) are available to all registered chats, while account-level actions (profile updates, group management) are restricted to the main group only.
+
 Add these cases to the `switch (data.type)` block in `processTaskIpc` in `src/ipc.ts`. First, extend the data type by finding the existing type definition and adding the new fields:
 
 ```typescript
@@ -2039,10 +2041,6 @@ Then add the case handlers before the `default:` case:
 
 ```typescript
 case 'signal_react':
-  if (!isMain) {
-    logger.warn({ sourceGroup }, 'Unauthorized signal_react attempt blocked');
-    break;
-  }
   if (data.recipient && data.targetAuthor && data.targetTimestamp && data.reaction) {
     try {
       const { signalReact } = await import('./signal/client.js');
@@ -2063,10 +2061,6 @@ case 'signal_react':
   break;
 
 case 'signal_create_poll':
-  if (!isMain) {
-    logger.warn({ sourceGroup }, 'Unauthorized signal_create_poll attempt blocked');
-    break;
-  }
   if (data.recipient && data.question && data.answers) {
     try {
       const { signalCreatePoll } = await import('./signal/client.js');
@@ -2131,10 +2125,6 @@ case 'signal_typing':
   break;
 
 case 'signal_vote_poll':
-  if (!isMain) {
-    logger.warn({ sourceGroup }, 'Unauthorized signal_vote_poll attempt blocked');
-    break;
-  }
   if (data.recipient && data.pollTimestamp && data.votes) {
     try {
       const { signalVotePoll } = await import('./signal/client.js');
@@ -2154,10 +2144,6 @@ case 'signal_vote_poll':
   break;
 
 case 'signal_send_sticker':
-  if (!isMain) {
-    logger.warn({ sourceGroup }, 'Unauthorized signal_send_sticker attempt blocked');
-    break;
-  }
   if (data.recipient && data.packId && typeof data.stickerId === 'number') {
     try {
       const { signalSendSticker } = await import('./signal/client.js');
@@ -2177,10 +2163,6 @@ case 'signal_send_sticker':
   break;
 
 case 'signal_list_sticker_packs':
-  if (!isMain) {
-    logger.warn({ sourceGroup }, 'Unauthorized signal_list_sticker_packs attempt blocked');
-    break;
-  }
   try {
     const { signalListStickerPacks } = await import('./signal/client.js');
     const baseUrl = `http://${process.env.SIGNAL_HTTP_HOST || '127.0.0.1'}:${process.env.SIGNAL_HTTP_PORT || '8080'}`;
@@ -2315,11 +2297,11 @@ case 'signal_quit_group':
 The container agent needs MCP tools to invoke Signal features via IPC. Add these tools to `container/agent-runner/src/ipc-mcp-stdio.ts` before the stdio transport startup line:
 
 ```typescript
-// -- Signal-specific tools (main group only) --
+// -- Signal messaging tools (all groups) --
 
 server.tool(
   'signal_react',
-  'React to a Signal message with an emoji. Main group only.',
+  'React to a Signal message with an emoji.',
   {
     recipient: z.string().describe('The recipient JID (phone number or group JID)'),
     target_author: z.string().describe('Phone number of the message author'),
@@ -2327,9 +2309,6 @@ server.tool(
     reaction: z.string().describe('Emoji reaction (e.g., "👍")'),
   },
   async (args) => {
-    if (!isMain) {
-      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
-    }
     writeIpcFile(TASKS_DIR, {
       type: 'signal_react',
       recipient: args.recipient,
@@ -2344,7 +2323,7 @@ server.tool(
 
 server.tool(
   'signal_create_poll',
-  'Create a poll in a Signal chat. Main group only.',
+  'Create a poll in a Signal chat.',
   {
     recipient: z.string().describe('The recipient JID'),
     question: z.string().describe('Poll question'),
@@ -2352,9 +2331,6 @@ server.tool(
     allow_multiple: z.boolean().default(false).describe('Allow selecting multiple answers'),
   },
   async (args) => {
-    if (!isMain) {
-      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
-    }
     writeIpcFile(TASKS_DIR, {
       type: 'signal_create_poll',
       recipient: args.recipient,
@@ -2376,7 +2352,7 @@ server.tool(
   },
   async (args) => {
     if (!isMain) {
-      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+      return { content: [{ type: 'text' as const, text: 'Only the main group can update the bot profile.' }], isError: true };
     }
     writeIpcFile(TASKS_DIR, {
       type: 'update_signal_profile',
@@ -2398,7 +2374,7 @@ server.tool(
   },
   async (args) => {
     if (!isMain) {
-      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+      return { content: [{ type: 'text' as const, text: 'Only the main group can create Signal groups.' }], isError: true };
     }
     writeIpcFile(TASKS_DIR, {
       type: 'signal_create_group',
@@ -2413,12 +2389,9 @@ server.tool(
 
 server.tool(
   'signal_list_sticker_packs',
-  'List installed Signal sticker packs. Main group only.',
+  'List installed Signal sticker packs.',
   {},
   async () => {
-    if (!isMain) {
-      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
-    }
     writeIpcFile(TASKS_DIR, {
       type: 'signal_list_sticker_packs',
       timestamp: new Date().toISOString(),
@@ -2429,16 +2402,13 @@ server.tool(
 
 server.tool(
   'signal_send_sticker',
-  'Send a sticker to a Signal chat. Main group only.',
+  'Send a sticker to a Signal chat.',
   {
     recipient: z.string().describe('The recipient JID'),
     pack_id: z.string().describe('Sticker pack ID'),
     sticker_id: z.number().describe('Sticker index within the pack'),
   },
   async (args) => {
-    if (!isMain) {
-      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
-    }
     writeIpcFile(TASKS_DIR, {
       type: 'signal_send_sticker',
       recipient: args.recipient,
