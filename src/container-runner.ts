@@ -1,6 +1,6 @@
 /**
  * Container Runner for NanoClaw
- * Spawns agent execution in Apple Container and handles IPC
+ * Spawns agent execution in Docker container and handles IPC
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
@@ -40,7 +40,7 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
-  secrets?: Record<string, string>;
+  model?: string;
 }
 
 export interface ContainerOutput {
@@ -87,7 +87,7 @@ function buildVolumeMounts(
     });
 
     // Global memory directory (read-only for non-main)
-    // Apple Container only supports directory mounts, not file mounts
+    // Docker bind mounts work with both files and directories
     const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
@@ -158,6 +158,33 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Environment file directory (keeps credentials out of process listings)
+  // Only expose specific auth variables needed by Claude Code, not the entire .env
+  const envDir = path.join(DATA_DIR, 'env');
+  fs.mkdirSync(envDir, { recursive: true });
+  const envFile = path.join(projectRoot, '.env');
+  if (fs.existsSync(envFile)) {
+    const envContent = fs.readFileSync(envFile, 'utf-8');
+    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+    const filteredLines = envContent.split('\n').filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return false;
+      return allowedVars.some((v) => trimmed.startsWith(`${v}=`));
+    });
+
+    if (filteredLines.length > 0) {
+      fs.writeFileSync(
+        path.join(envDir, 'env'),
+        filteredLines.join('\n') + '\n',
+      );
+      mounts.push({
+        hostPath: envDir,
+        containerPath: '/workspace/env-dir',
+        readonly: true,
+      });
+    }
+  }
+
   // Mount agent-runner source from host — recompiled on container startup.
   // Bypasses Apple Container's sticky build cache for code changes.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
@@ -180,48 +207,13 @@ function buildVolumeMounts(
   return mounts;
 }
 
-/**
- * Read allowed secrets from .env for passing to the container via stdin.
- * Secrets are never written to disk or mounted as files.
- */
-function readSecrets(): Record<string, string> {
-  const envFile = path.join(process.cwd(), '.env');
-  if (!fs.existsSync(envFile)) return {};
-
-  const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
-  const secrets: Record<string, string> = {};
-  const content = fs.readFileSync(envFile, 'utf-8');
-
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    if (!allowedVars.includes(key)) continue;
-    let value = trimmed.slice(eqIdx + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    if (value) secrets[key] = value;
-  }
-
-  return secrets;
-}
-
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
-  // Apple Container: --mount for readonly, -v for read-write
+  // Docker: -v with :ro suffix for readonly
   for (const mount of mounts) {
     if (mount.readonly) {
-      args.push(
-        '--mount',
-        `type=bind,source=${mount.hostPath},target=${mount.containerPath},readonly`,
-      );
+      args.push('-v', `${mount.hostPath}:${mount.containerPath}:ro`);
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
     }
@@ -275,7 +267,7 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    const container = spawn('container', containerArgs, {
+    const container = spawn('docker', containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -286,12 +278,9 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    // Pass secrets via stdin (never written to disk or mounted as files)
-    input.secrets = readSecrets();
+    // Write input and close stdin (Apple Container doesn't flush pipe without EOF)
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
-    // Remove secrets from input so they don't appear in logs
-    delete input.secrets;
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
@@ -382,7 +371,7 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      exec(`container stop ${containerName}`, { timeout: 15000 }, (err) => {
+      exec(`docker stop ${containerName}`, { timeout: 15000 }, (err) => {
         if (err) {
           logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');

@@ -4,12 +4,21 @@ import path from 'path';
 
 import {
   ASSISTANT_NAME,
+  CLAUDE_MODEL,
   DATA_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
   TRIGGER_PATTERN,
+  SIGNAL_ACCOUNT,
+  SIGNAL_CLI_PATH,
+  SIGNAL_HTTP_HOST,
+  SIGNAL_HTTP_PORT,
+  SIGNAL_SPAWN_DAEMON,
+  SIGNAL_ALLOW_FROM,
+  SIGNAL_ONLY,
 } from './config.js';
+import { SignalChannel } from './channels/signal.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import {
   ContainerOutput,
@@ -34,9 +43,9 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
-import { formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { NewMessage, RegisteredGroup } from './types.js';
+import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -48,7 +57,8 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let whatsapp: WhatsAppChannel | null = null;
+const channels: Channel[] = [];
 const queue = new GroupQueue();
 
 function loadState(): void {
@@ -99,7 +109,10 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter((c) => c.jid !== '__group_sync__' && c.jid.endsWith('@g.us'))
+    .filter((c) =>
+      c.jid !== '__group_sync__' &&
+      (c.jid.endsWith('@g.us') || c.jid.startsWith('tg:') || c.jid.startsWith('signal:')),
+    )
     .map((c) => ({
       jid: c.jid,
       name: c.name,
@@ -120,6 +133,13 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
 async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
+
+  // Find the channel that owns this JID
+  const channel = findChannel(channels, chatJid);
+  if (!channel) {
+    logger.warn({ chatJid }, 'No channel found for JID');
+    return true;
+  }
 
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
@@ -165,7 +185,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await whatsapp.setTyping(chatJid, true);
+  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -177,7 +197,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await whatsapp.sendMessage(chatJid, `${ASSISTANT_NAME}: ${text}`);
+        const formatted = formatOutbound(channel, text);
+        if (formatted) await channel.sendMessage(chatJid, formatted);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -189,7 +210,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await whatsapp.setTyping(chatJid, false);
+  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -263,6 +284,7 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        model: CLAUDE_MODEL,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
@@ -391,58 +413,34 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
+function ensureDockerRunning(): void {
   try {
-    execSync('container system status', { stdio: 'pipe' });
-    logger.debug('Apple Container system already running');
+    execSync('docker info', { stdio: 'pipe', timeout: 10000 });
+    logger.debug('Docker daemon is running');
   } catch {
-    logger.info('Starting Apple Container system...');
-    try {
-      execSync('container system start', { stdio: 'pipe', timeout: 30000 });
-      logger.info('Apple Container system started');
-    } catch (err) {
-      logger.error({ err }, 'Failed to start Apple Container system');
-      console.error(
-        '\n╔════════════════════════════════════════════════════════════════╗',
-      );
-      console.error(
-        '║  FATAL: Apple Container system failed to start                 ║',
-      );
-      console.error(
-        '║                                                                ║',
-      );
-      console.error(
-        '║  Agents cannot run without Apple Container. To fix:           ║',
-      );
-      console.error(
-        '║  1. Install from: https://github.com/apple/container/releases ║',
-      );
-      console.error(
-        '║  2. Run: container system start                               ║',
-      );
-      console.error(
-        '║  3. Restart NanoClaw                                          ║',
-      );
-      console.error(
-        '╚════════════════════════════════════════════════════════════════╝\n',
-      );
-      throw new Error('Apple Container system is required but failed to start');
-    }
+    logger.error('Docker daemon is not running');
+    console.error('\n╔════════════════════════════════════════════════════════════════╗');
+    console.error('║  FATAL: Docker is not running                                  ║');
+    console.error('║                                                                ║');
+    console.error('║  Agents cannot run without Docker. To fix:                     ║');
+    console.error('║  macOS: Start Docker Desktop                                   ║');
+    console.error('║  Linux: sudo systemctl start docker                            ║');
+    console.error('║                                                                ║');
+    console.error('║  Install from: https://docker.com/products/docker-desktop      ║');
+    console.error('╚════════════════════════════════════════════════════════════════╝\n');
+    throw new Error('Docker is required but not running');
   }
 
   // Kill and clean up orphaned NanoClaw containers from previous runs
   try {
-    const output = execSync('container ls --format json', {
+    const output = execSync('docker ps --filter "name=nanoclaw-" --format "{{.Names}}"', {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
-    const containers: { status: string; configuration: { id: string } }[] = JSON.parse(output || '[]');
-    const orphans = containers
-      .filter((c) => c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'))
-      .map((c) => c.configuration.id);
+    const orphans = output.trim().split('\n').filter(Boolean);
     for (const name of orphans) {
       try {
-        execSync(`container stop ${name}`, { stdio: 'pipe' });
+        execSync(`docker stop ${name}`, { stdio: 'pipe' });
       } catch { /* already stopped */ }
     }
     if (orphans.length > 0) {
@@ -454,7 +452,7 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  ensureDockerRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();
@@ -463,21 +461,45 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     await queue.shutdown(10000);
-    await whatsapp.disconnect();
+    for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Create WhatsApp channel
-  whatsapp = new WhatsAppChannel({
-    onMessage: (chatJid, msg) => storeMessage(msg),
-    onChatMetadata: (chatJid, timestamp) => storeChatMetadata(chatJid, timestamp),
+  // Channel callbacks (shared by all channels)
+  const channelOpts = {
+    onMessage: (chatJid: string, msg: NewMessage) => storeMessage(msg),
+    onChatMetadata: (chatJid: string, timestamp: string, name?: string) =>
+      storeChatMetadata(chatJid, timestamp, name),
     registeredGroups: () => registeredGroups,
-  });
+  };
 
-  // Connect — resolves when first connected
-  await whatsapp.connect();
+  // Create and connect channels
+  if (!SIGNAL_ONLY) {
+    whatsapp = new WhatsAppChannel(channelOpts);
+    channels.push(whatsapp);
+    await whatsapp.connect();
+  }
+
+  if (SIGNAL_ACCOUNT) {
+    const signal = new SignalChannel({
+      ...channelOpts,
+      account: SIGNAL_ACCOUNT,
+      cliPath: SIGNAL_CLI_PATH,
+      httpHost: SIGNAL_HTTP_HOST,
+      httpPort: SIGNAL_HTTP_PORT,
+      spawnDaemon: SIGNAL_SPAWN_DAEMON,
+      allowFrom: SIGNAL_ALLOW_FROM,
+    });
+    channels.push(signal);
+    await signal.connect();
+  }
+
+  if (channels.length === 0) {
+    logger.error('No channels configured. Set SIGNAL_ACCOUNT or disable SIGNAL_ONLY.');
+    process.exit(1);
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -486,15 +508,21 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
-      const text = formatOutbound(whatsapp, rawText);
-      if (text) await whatsapp.sendMessage(jid, text);
+      const channel = findChannel(channels, jid);
+      if (!channel) return;
+      const text = formatOutbound(channel, rawText);
+      if (text) await channel.sendMessage(jid, text);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => whatsapp.sendMessage(jid, text),
+    sendMessage: (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      return channel.sendMessage(jid, text);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp.syncGroupMetadata(force),
+    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });

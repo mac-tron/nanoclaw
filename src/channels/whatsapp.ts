@@ -103,9 +103,6 @@ export class WhatsAppChannel implements Channel {
         this.connected = true;
         logger.info('Connected to WhatsApp');
 
-        // Announce availability so WhatsApp relays subsequent presence updates (typing indicators)
-        this.sock.sendPresenceUpdate('available').catch(() => {});
-
         // Build LID to phone mapping from auth state for self-chat translation
         if (this.sock.user) {
           const phoneUser = this.sock.user.id.split(':')[0];
@@ -218,7 +215,7 @@ export class WhatsAppChannel implements Channel {
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     try {
-      await this.sock.sendPresenceUpdate(isTyping ? 'composing' : 'available', jid);
+      await this.sock.sendPresenceUpdate(isTyping ? 'composing' : 'paused', jid);
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to update typing status');
     }

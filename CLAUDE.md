@@ -4,7 +4,7 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process that connects to WhatsApp, routes messages to Claude Agent SDK running in Apple Container (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process that connects to messaging channels (WhatsApp, Signal, Telegram), routes messages to Claude Agent SDK running in Apple Container (Linux VMs). Each group has isolated filesystem and memory.
 
 ## Key Files
 
@@ -12,6 +12,9 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
 | `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
+| `src/channels/signal.ts` | Signal connection via signal-cli daemon |
+| `src/signal/client.ts` | JSON-RPC client for signal-cli HTTP API |
+| `src/signal/daemon.ts` | Spawns signal-cli daemon (local mode) |
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
@@ -28,6 +31,7 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 | `/setup` | First-time installation, authentication, service configuration |
 | `/customize` | Adding channels, integrations, changing behavior |
 | `/debug` | Container issues, logs, troubleshooting |
+| `/add-signal` | Add Signal as a channel using signal-cli Docker sidecar |
 
 ## Development
 

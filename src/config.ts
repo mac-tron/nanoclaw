@@ -53,3 +53,18 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// --- Signal configuration ---
+export const SIGNAL_ACCOUNT = process.env.SIGNAL_ACCOUNT || '';
+export const SIGNAL_CLI_PATH = process.env.SIGNAL_CLI_PATH || 'signal-cli';
+export const SIGNAL_HTTP_HOST = process.env.SIGNAL_HTTP_HOST || '127.0.0.1';
+export const SIGNAL_HTTP_PORT = parseInt(process.env.SIGNAL_HTTP_PORT || '8080', 10);
+export const SIGNAL_SPAWN_DAEMON = process.env.SIGNAL_SPAWN_DAEMON !== '0';
+export const SIGNAL_ALLOW_FROM = process.env.SIGNAL_ALLOW_FROM
+  ? process.env.SIGNAL_ALLOW_FROM.split(',').map(s => s.trim())
+  : [];
+export const SIGNAL_ONLY = process.env.SIGNAL_ONLY === 'true';
+
+// --- Claude model configuration ---
+// Default to Sonnet for speed/cost, can override with Opus for complex tasks
+export const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';

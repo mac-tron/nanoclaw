@@ -72,7 +72,6 @@ let fakeSocket: ReturnType<typeof createFakeSocket>;
 vi.mock('@whiskeysockets/baileys', () => {
   return {
     default: vi.fn(() => fakeSocket),
-    Browsers: { macOS: vi.fn(() => ['macOS', 'Chrome', '']) },
     DisconnectReason: {
       loggedOut: 401,
       badSession: 500,
@@ -127,10 +126,8 @@ function triggerDisconnect(statusCode: number) {
   });
 }
 
-async function triggerMessages(messages: unknown[]) {
+function triggerMessages(messages: unknown[]) {
   fakeSocket._ev.emit('messages.upsert', { messages });
-  // Flush microtasks so the async messages.upsert handler completes
-  await new Promise((r) => setTimeout(r, 0));
 }
 
 // --- Tests ---
@@ -300,7 +297,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-1',
@@ -335,7 +332,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-2',
@@ -362,7 +359,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-3',
@@ -384,7 +381,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-4',
@@ -405,7 +402,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-5',
@@ -433,7 +430,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-6',
@@ -461,7 +458,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-7',
@@ -489,7 +486,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-8',
@@ -518,7 +515,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-9',
@@ -559,7 +556,7 @@ describe('WhatsAppChannel', () => {
 
       // The socket has lid '9876543210:1@lid' → phone '1234567890@s.whatsapp.net'
       // Send a message from the LID
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-lid',
@@ -585,7 +582,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-normal',
@@ -611,7 +608,7 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      await triggerMessages([
+      triggerMessages([
         {
           key: {
             id: 'msg-unknown-lid',
@@ -823,14 +820,14 @@ describe('WhatsAppChannel', () => {
       expect(fakeSocket.sendPresenceUpdate).toHaveBeenCalledWith('composing', 'test@g.us');
     });
 
-    it('sends available presence when stopping', async () => {
+    it('sends paused presence when stopping', async () => {
       const opts = createTestOpts();
       const channel = new WhatsAppChannel(opts);
 
       await connectChannel(channel);
 
       await channel.setTyping('test@g.us', false);
-      expect(fakeSocket.sendPresenceUpdate).toHaveBeenCalledWith('available', 'test@g.us');
+      expect(fakeSocket.sendPresenceUpdate).toHaveBeenCalledWith('paused', 'test@g.us');
     });
 
     it('handles typing indicator failure gracefully', async () => {
