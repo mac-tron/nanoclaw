@@ -2038,6 +2038,54 @@ members?: string[];
 Then add the case handlers before the `default:` case:
 
 ```typescript
+case 'signal_react':
+  if (!isMain) {
+    logger.warn({ sourceGroup }, 'Unauthorized signal_react attempt blocked');
+    break;
+  }
+  if (data.recipient && data.targetAuthor && data.targetTimestamp && data.reaction) {
+    try {
+      const { signalReact } = await import('./signal/client.js');
+      const baseUrl = `http://${process.env.SIGNAL_HTTP_HOST || '127.0.0.1'}:${process.env.SIGNAL_HTTP_PORT || '8080'}`;
+      await signalReact({
+        baseUrl,
+        account: process.env.SIGNAL_ACCOUNT || '',
+        recipient: data.recipient,
+        targetAuthor: data.targetAuthor,
+        targetTimestamp: data.targetTimestamp,
+        reaction: data.reaction,
+      });
+      logger.info({ recipient: data.recipient, reaction: data.reaction }, 'Signal reaction sent via IPC');
+    } catch (err) {
+      logger.error({ err }, 'Failed to send Signal reaction via IPC');
+    }
+  }
+  break;
+
+case 'signal_create_poll':
+  if (!isMain) {
+    logger.warn({ sourceGroup }, 'Unauthorized signal_create_poll attempt blocked');
+    break;
+  }
+  if (data.recipient && data.question && data.answers) {
+    try {
+      const { signalCreatePoll } = await import('./signal/client.js');
+      const baseUrl = `http://${process.env.SIGNAL_HTTP_HOST || '127.0.0.1'}:${process.env.SIGNAL_HTTP_PORT || '8080'}`;
+      await signalCreatePoll({
+        baseUrl,
+        account: process.env.SIGNAL_ACCOUNT || '',
+        recipient: data.recipient,
+        question: data.question,
+        answers: data.answers,
+        allowMultipleSelections: data.allowMultipleSelections ?? false,
+      });
+      logger.info({ recipient: data.recipient, question: data.question }, 'Signal poll created via IPC');
+    } catch (err) {
+      logger.error({ err }, 'Failed to create Signal poll via IPC');
+    }
+  }
+  break;
+
 case 'update_signal_profile':
   if (!isMain) {
     logger.warn({ sourceGroup }, 'Unauthorized update_signal_profile attempt blocked');
@@ -2262,14 +2310,156 @@ case 'signal_quit_group':
   break;
 ```
 
-### Step 3: Final Build and Restart
+### Step 3: Add Agent MCP Tools
+
+The container agent needs MCP tools to invoke Signal features via IPC. Add these tools to `container/agent-runner/src/ipc-mcp-stdio.ts` before the stdio transport startup line:
+
+```typescript
+// -- Signal-specific tools (main group only) --
+
+server.tool(
+  'signal_react',
+  'React to a Signal message with an emoji. Main group only.',
+  {
+    recipient: z.string().describe('The recipient JID (phone number or group JID)'),
+    target_author: z.string().describe('Phone number of the message author'),
+    target_timestamp: z.number().describe('Timestamp of the message to react to'),
+    reaction: z.string().describe('Emoji reaction (e.g., "👍")'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'signal_react',
+      recipient: args.recipient,
+      targetAuthor: args.target_author,
+      targetTimestamp: args.target_timestamp,
+      reaction: args.reaction,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Reaction ${args.reaction} sent.` }] };
+  },
+);
+
+server.tool(
+  'signal_create_poll',
+  'Create a poll in a Signal chat. Main group only.',
+  {
+    recipient: z.string().describe('The recipient JID'),
+    question: z.string().describe('Poll question'),
+    answers: z.array(z.string()).describe('Poll answer options'),
+    allow_multiple: z.boolean().default(false).describe('Allow selecting multiple answers'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'signal_create_poll',
+      recipient: args.recipient,
+      question: args.question,
+      answers: args.answers,
+      allowMultipleSelections: args.allow_multiple,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Poll created: ${args.question}` }] };
+  },
+);
+
+server.tool(
+  'signal_update_profile',
+  'Update the bot\'s Signal profile name or status text. Main group only.',
+  {
+    name: z.string().optional().describe('Display name (max 26 chars)'),
+    about: z.string().optional().describe('Status text (max 140 chars)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'update_signal_profile',
+      name: args.name,
+      about: args.about,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'Profile update requested.' }] };
+  },
+);
+
+server.tool(
+  'signal_create_group',
+  'Create a new Signal group. Main group only.',
+  {
+    group_name: z.string().describe('Name for the new group'),
+    members: z.array(z.string()).describe('Phone numbers to add (E.164 format)'),
+    description: z.string().optional().describe('Group description'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'signal_create_group',
+      groupName: args.group_name,
+      members: args.members,
+      description: args.description,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: `Group "${args.group_name}" creation requested.` }] };
+  },
+);
+
+server.tool(
+  'signal_list_sticker_packs',
+  'List installed Signal sticker packs. Main group only.',
+  {},
+  async () => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'signal_list_sticker_packs',
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'Sticker pack list requested. Check responses directory.' }] };
+  },
+);
+
+server.tool(
+  'signal_send_sticker',
+  'Send a sticker to a Signal chat. Main group only.',
+  {
+    recipient: z.string().describe('The recipient JID'),
+    pack_id: z.string().describe('Sticker pack ID'),
+    sticker_id: z.number().describe('Sticker index within the pack'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return { content: [{ type: 'text' as const, text: 'Only the main group can use Signal tools.' }], isError: true };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'signal_send_sticker',
+      recipient: args.recipient,
+      packId: args.pack_id,
+      stickerId: args.sticker_id,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'Sticker sent.' }] };
+  },
+);
+```
+
+### Step 4: Rebuild Container and Restart
 
 ```bash
 npm run build
+./container/build.sh
 launchctl kickstart -k gui/$(id -u)/com.nanoclaw
 ```
 
-### Step 4: Verify Enhancements
+### Step 5: Verify Enhancements
 
 Tell the user:
 
