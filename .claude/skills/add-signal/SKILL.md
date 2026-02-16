@@ -1461,7 +1461,7 @@ Common issues:
 ### Account not linking
 
 1. Verify container is running: `docker ps | grep signal-cli`
-2. Test QR endpoint: `curl -sf http://localhost:8080/v1/qrcodelink?device_name=nanoclaw -o /dev/null && echo "OK" || echo "FAIL"`
+2. Test QR endpoint: `curl -sf http://${LOCAL_IP}:8080/v1/qrcodelink?device_name=nanoclaw -o /dev/null && echo "OK" || echo "FAIL"` (where `LOCAL_IP` is from `ipconfig getifaddr en0`)
 3. Restart container if endpoint fails
 4. Ensure Signal app is up to date
 
