@@ -341,7 +341,7 @@ server.tool(
       timestamp: new Date().toISOString(),
     });
 
-    const responsePath = path.join(RESPONSES_DIR, args.filename);
+    const responsePath = path.join(RESPONSES_DIR, path.basename(args.filename));
     const maxWait = 15000;
     const start = Date.now();
     while (Date.now() - start < maxWait) {

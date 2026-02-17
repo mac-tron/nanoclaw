@@ -516,7 +516,7 @@ export async function handleSignalIpc(
       if (data.attachmentId) {
         try {
           const buffer = await signalDownloadAttachment(SIGNAL_BASE_URL, data.attachmentId);
-          const filename = data.filename || `attachment-${data.attachmentId}`;
+          const filename = path.basename(data.filename || `attachment-${data.attachmentId}`);
           const responseFile = path.join(dataDir, 'ipc', sourceGroup, 'responses', filename);
           fs.mkdirSync(path.dirname(responseFile), { recursive: true });
           fs.writeFileSync(responseFile, buffer);

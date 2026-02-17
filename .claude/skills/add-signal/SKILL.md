@@ -66,8 +66,8 @@ Use `AskUserQuestion` with the applicable questions. Batch as many questions as 
     "question": "Who should the bot respond to within registered chats?",
     "header": "Sender filter",
     "options": [
-      {"label": "All members (Recommended)", "description": "Anyone in a registered chat can trigger the agent"},
-      {"label": "Specific numbers only", "description": "Only approved phone numbers are processed"}
+      {"label": "Specific numbers only (Recommended)", "description": "Only approved phone numbers are processed within registered chats"},
+      {"label": "All members", "description": "Anyone in a registered chat can trigger the agent"}
     ],
     "multiSelect": false
   }
@@ -156,6 +156,38 @@ Display a summary table and confirm before deployment:
 > Proceed with deployment?
 
 Once confirmed, execute all implementation steps without further interaction.
+
+## Phase 1.5: Pre-flight Checks
+
+Before starting implementation, check what already exists to avoid duplicate work or overwriting previous configuration.
+
+```bash
+# Check for existing Signal source files
+ls src/signal/client.ts src/channels/signal.ts src/ipc-signal.ts 2>/dev/null
+
+# Check for existing .env Signal configuration
+grep -E '^SIGNAL_' .env 2>/dev/null
+
+# Check for existing Signal registration in DB
+sqlite3 store/messages.db "SELECT jid FROM registered_groups WHERE jid LIKE 'signal:%'" 2>/dev/null
+
+# Check for existing docker-compose with signal-cli
+grep signal-cli docker-compose.yml 2>/dev/null
+
+# Check if signal-cli container is already running
+docker ps --filter "name=signal-cli" --format "{{.Names}}" 2>/dev/null
+
+# Check plist working directory matches current project
+grep WorkingDirectory ~/Library/LaunchAgents/com.nanoclaw.plist 2>/dev/null
+```
+
+Use these results to skip steps that are already complete:
+- If Signal source files exist, skip Steps 1-4 (file copies and config merge)
+- If `.env` already has `SIGNAL_ACCOUNT`, skip Step 9 (but verify values match Phase 1 answers)
+- If the DB already has a `signal:` registration, skip Step 12
+- If `docker-compose.yml` already has `signal-cli`, skip Step 6
+- If the signal-cli container is already running and healthy, skip Steps 6-7
+- If the plist `WorkingDirectory` doesn't match `pwd`, update it in Step 10
 
 ## Phase 2: Implementation
 
@@ -282,7 +314,7 @@ Replace with:
 Replace with:
 
 ```typescript
-        const formatted = formatOutbound(channel, text);
+        const formatted = formatOutbound(text);
         if (formatted) await channel.sendMessage(chatJid, formatted);
 ```
 
@@ -367,7 +399,7 @@ The existing `main()` creates WhatsApp unconditionally and wires subsystems dire
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
-      const text = formatOutbound(whatsapp, rawText);
+      const text = formatOutbound(rawText);
       if (text) await whatsapp.sendMessage(jid, text);
     },
   });
@@ -384,7 +416,7 @@ Replace with:
     sendMessage: async (jid, rawText) => {
       const ch = findChannel(channels, jid);
       if (!ch) { logger.warn({ jid }, 'No channel for scheduled message'); return; }
-      const text = formatOutbound(ch, rawText);
+      const text = formatOutbound(rawText);
       if (text) await ch.sendMessage(jid, text);
     },
   });
@@ -544,6 +576,7 @@ SIGNAL_ALLOW_FROM=+61412345678,+61498765432
 Sync to container environment:
 
 ```bash
+mkdir -p data/env
 cp .env data/env/env
 ```
 
@@ -644,8 +677,11 @@ mkdir -p groups/main/logs
 
 ```bash
 npm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
 ```
+
+> **Note:** Use `unload`/`load` (not `kickstart -k`) whenever the plist XML has been modified (e.g. new environment variables in Step 10). `kickstart -k` only restarts the process without re-reading the plist definition.
 
 ### Step 13: Test
 
@@ -682,13 +718,36 @@ Replace `YOUR_BOT_NAME` and `YOUR_STATUS_TEXT` with the user's values from Phase
 
 > Signal IPC handlers follow a two-tier security model: messaging enhancements (reactions, polls, stickers) are available to all registered chats, while account-level actions (profile updates, group management) are restricted to the main group only.
 
-Merge the handlers from `src/ipc-signal.ts` into the `switch (data.type)` block in `processTaskIpc` in `src/ipc.ts`. The file exports a `handleSignalIpc` function, an `authorizeSignalChat` helper, and a `validateMessageReference` function that can be called directly from the existing switch block, or the individual case handlers can be copied in.
-
-**Note:** The file imports `path` and `fs` at the top (`import * as path from 'node:path'` and `import * as fs from 'node:fs'`). When merging into `src/ipc.ts`, add these imports if they don't already exist (or convert to match the existing import style).
+Copy `src/ipc-signal.ts` from the skill's source files into the project as a standalone module:
 
 ```bash
-cat <skill>/src/ipc-signal.ts  # review, then merge into src/ipc.ts
+cp <skill>/src/ipc-signal.ts src/ipc-signal.ts
 ```
+
+The file exports a `handleSignalIpc` function that handles all Signal IPC cases. Import and call it from the `default:` case in the `processTaskIpc` switch block in `src/ipc.ts`:
+
+```typescript
+// At the top of src/ipc.ts, add:
+import { handleSignalIpc } from './ipc-signal.js';
+
+// Replace the default: case with:
+default: {
+  const registeredGroupsMap = deps.registeredGroups();
+  const handled = await handleSignalIpc(
+    data as Parameters<typeof handleSignalIpc>[0],
+    sourceGroup,
+    isMain,
+    registeredGroupsMap,
+    DATA_DIR,
+  );
+  if (!handled) {
+    logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+  break;
+}
+```
+
+This approach keeps the Signal IPC handlers in their own module rather than inlining hundreds of lines into the existing switch block.
 
 The file includes:
 
@@ -717,11 +776,11 @@ The `signal_create_poll` handler registers new polls in the in-memory poll store
 - `signal_create_group`, `signal_update_group`
 - `signal_add_group_members`, `signal_remove_group_members`, `signal_quit_group`
 
-### Step 3: Enable Message Timestamps and Chat Context
+### Step 3: Enable Message Timestamps
 
-The container agent needs the chat name/JID for context, and needs message timestamps back from `send_message` so it can edit/delete its own messages. Several plumbing changes are required:
+The container agent needs message timestamps back from `send_message` so it can edit/delete its own messages.
 
-**3.0a. Update `Channel` interface in `src/types.ts`:**
+**3.1. Update `Channel` interface in `src/types.ts`:**
 
 Change `sendMessage` to return an optional timestamp:
 
@@ -729,7 +788,21 @@ Change `sendMessage` to return an optional timestamp:
 sendMessage(jid: string, text: string): Promise<{ timestamp?: number } | void>;
 ```
 
-**3.0b. Update `SignalChannel.sendMessage` in `src/channels/signal.ts`:**
+**3.2. Update `routeOutbound` in `src/router.ts`:**
+
+The `routeOutbound` function calls `channel.sendMessage()`, so its return type must match. Change:
+
+```typescript
+): Promise<void> {
+```
+
+to:
+
+```typescript
+): Promise<{ timestamp?: number } | void> {
+```
+
+**3.3. Update `SignalChannel.sendMessage` in `src/channels/signal.ts`:**
 
 Change from `Promise<void>` to `Promise<{ timestamp?: number }>` and return the result from `sendMessageExtended`:
 
@@ -748,7 +821,7 @@ async sendMessage(jid: string, text: string): Promise<{ timestamp?: number }> {
 }
 ```
 
-**3.0c. Update IPC watcher dep in `src/ipc.ts`:**
+**3.4. Update IPC watcher dep in `src/ipc.ts`:**
 
 Change the `sendMessage` type to return the timestamp:
 
@@ -759,7 +832,7 @@ sendMessage: (jid: string, text: string) => Promise<{ timestamp?: number } | voi
 And in the message handler, capture the result, store the outbound message in the DB (so validation can verify it), and write the timestamp back:
 
 ```typescript
-const sendResult = await deps.sendMessage(data.chatJid, `${ASSISTANT_NAME}: ${data.text}`);
+const sendResult = await deps.sendMessage(data.chatJid, data.text);
 
 // Store outbound message in DB so validation can verify it
 const outboundTs = (sendResult && 'timestamp' in sendResult) ? sendResult.timestamp : undefined;
@@ -770,7 +843,7 @@ storeMessage({
   chat_jid: data.chatJid,
   sender: outboundSender,
   sender_name: ASSISTANT_NAME,
-  content: `${ASSISTANT_NAME}: ${data.text}`,
+  content: data.text,
   timestamp: new Date().toISOString(),
   source_timestamp: outboundTs,
   is_from_me: true,
@@ -785,7 +858,7 @@ try {
     source_timestamp: outboundTs ?? null,
     sender_id: outboundSender,
     sender_name: ASSISTANT_NAME,
-    content: `${ASSISTANT_NAME}: ${data.text}`.slice(0, 200),
+    content: data.text.slice(0, 200),
     timestamp: new Date().toISOString(),
     is_from_me: true,
   });
@@ -807,7 +880,7 @@ if (data.responseId && sendResult && 'timestamp' in sendResult) {
 
 **Note:** Import `storeMessage` from `./db.js` at the top of `src/ipc.ts`.
 
-**3.0d. Update IPC watcher callback in `src/index.ts`:**
+**3.5. Update IPC watcher callback in `src/index.ts`:**
 
 The `sendMessage` callback in `startIpcWatcher` must return the channel result:
 
@@ -821,7 +894,7 @@ sendMessage: async (jid, text) => {
 
 Now the chat context changes:
 
-**3a. Add `chatName` to `ContainerInput` in `src/container-runner.ts`:**
+**3.6. Add `chatName` and `responses/` directory to `src/container-runner.ts`:**
 
 Find the `ContainerInput` interface and add `chatName`:
 
@@ -838,7 +911,15 @@ export interface ContainerInput {
 }
 ```
 
-**3b. Pass `chatName` from the orchestrator in `src/index.ts`:**
+Also find the IPC directory creation block (where `messages/`, `tasks/`, and `input/` subdirectories are created with `mkdirSync`) and add a `responses/` directory alongside them:
+
+```typescript
+fs.mkdirSync(path.join(groupIpcDir, 'responses'), { recursive: true });
+```
+
+This directory must exist before the container starts because the agent's `send_message` tool polls it for timestamp responses.
+
+**3.7. Pass `chatName` from the orchestrator in `src/index.ts`:**
 
 Find the `runContainerAgent` call in the `runAgent` function and add `chatName: group.name`:
 
@@ -856,7 +937,7 @@ const output = await runContainerAgent(
   ...
 ```
 
-**3c. Add `chatName` to `ContainerInput` in `container/agent-runner/src/index.ts` and pass it as env var:**
+**3.8. Add `chatName` to `ContainerInput` in `container/agent-runner/src/index.ts` and pass it as env var:**
 
 Add `chatName?: string` to the `ContainerInput` interface (same as 3a), then find the MCP server env block and add `NANOCLAW_CHAT_NAME`:
 
@@ -869,7 +950,7 @@ env: {
 },
 ```
 
-**3d. Read the env var in `container/agent-runner/src/ipc-mcp-stdio.ts`:**
+**3.9. Read the env var in `container/agent-runner/src/ipc-mcp-stdio.ts`:**
 
 Add after the existing `CHAT_JID` line:
 
@@ -883,13 +964,11 @@ const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
 ### Step 4: Add Agent MCP Tools
 
-The container agent needs MCP tools to invoke Signal features via IPC. Copy the MCP tools source file and merge its contents into the container agent:
+The container agent needs MCP tools to invoke Signal features via IPC. Merge the tool registrations from `<skill>/src/mcp-signal-tools.ts` into `container/agent-runner/src/ipc-mcp-stdio.ts` before the `// Start the stdio transport` line.
 
-```bash
-cp <skill>/src/mcp-signal-tools.ts container/agent-runner/src/mcp-signal-tools.ts
-```
+**Important:** Do NOT copy `mcp-signal-tools.ts` into `container/agent-runner/src/` as a standalone file. It is a code snippet that references variables (`server`, `z`, `CHAT_JID`, `writeIpcFile`, etc.) from `ipc-mcp-stdio.ts` without its own imports, so TypeScript will fail to compile it as a separate module. Read it as a reference and inline the tool registrations directly into `ipc-mcp-stdio.ts`.
 
-Merge the tool registrations from `mcp-signal-tools.ts` into `container/agent-runner/src/ipc-mcp-stdio.ts` before the stdio transport startup line. The file contains:
+The file contains:
 
 - **Updated `send_message`** - replaces the existing tool to support timestamp responses (needed for edit/delete). The agent sends a `responseId` and polls for the host to write back the sent message timestamp.
 - **`get_chat_info`** - exposes chat name, JID, group folder, and main channel status
@@ -1004,9 +1083,13 @@ writeMessagesSnapshot(group.folder, getRecentMessages(chatJid));
 
 ### Step 4c: Update Global CLAUDE.md
 
-Add this section to `groups/global/CLAUDE.md` so the agent always knows to use `get_recent_messages`:
+Add these sections to `groups/global/CLAUDE.md` so the agent knows the correct patterns:
 
 ```markdown
+## Group Registration
+
+When registering new groups, ALWAYS use the `mcp__nanoclaw__register_group` tool. NEVER write directly to `registered_groups.json` or the database. The IPC tool updates the running process in-memory, so the bot starts responding immediately without a restart.
+
 ## Signal Tools: Required Lookup
 
 When using signal_react, signal_remove_reaction, signal_delete_message, signal_send_receipt, signal_edit_message, or signal_close_poll, you MUST call get_recent_messages first to look up the exact sender_id (phone number) and source_timestamp (numeric millisecond timestamp). NEVER guess or fabricate phone numbers or timestamps. These values come from the database and are the only way to target the correct message. The host validates all message references against the snapshot and silently rejects any that don't match.

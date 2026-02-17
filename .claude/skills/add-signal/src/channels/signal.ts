@@ -105,7 +105,7 @@ export interface SignalChannelOpts {
 
 export class SignalChannel implements Channel {
   name = 'signal';
-  prefixAssistantName = true;
+
 
   private opts: SignalChannelOpts;
   private baseUrl: string;
